@@ -50,12 +50,12 @@ Key constraints and behaviors implemented in code:
 ## Tech Stack
 
 - Go 1.24+
-- Router: go-chi/chi
+- Router: gin-gonic/gin
 - Database: PostgreSQL 16
 - Query layer: sqlc
-- Auth: JWT (go-chi/jwtauth)
+- Auth: JWT (lestrrat-go/jwx)
 - Logging: zerolog
-- API docs: swaggo + http-swagger
+- API docs: swaggo + gin-swagger
 - Testing: Go test + testify + race detector
 - Runtime: Docker + docker-compose
 

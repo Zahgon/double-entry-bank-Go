@@ -19,7 +19,7 @@ No prior fintech experience needed. Solid Go fundamentals and some SQL knowledge
 - [shopspring/decimal](https://github.com/shopspring/decimal) — the decimal library used for all money math
 - [sqlc documentation](https://docs.sqlc.dev/) — how SQL queries are compiled to type-safe Go
 - [golang-migrate](https://github.com/golang-migrate/migrate) — database migration tooling
-- [go-chi/jwtauth](https://github.com/go-chi/jwtauth) — JWT middleware used in this project
+- [lestrrat-go/jwx](https://github.com/lestrrat-go/jwx) — the JWT library backing the auth middleware in this project
 - [Effective Go](https://golang.org/doc/effective_go) — Go idioms and conventions referenced in the code style guide
 
 ## Live Demo

@@ -14,10 +14,8 @@ import (
 	"github.com/PaulBabatuyi/Double-Entry-Bank-Go/internal/api"
 	"github.com/PaulBabatuyi/Double-Entry-Bank-Go/internal/db"
 	"github.com/PaulBabatuyi/Double-Entry-Bank-Go/internal/service"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
-	"github.com/go-chi/jwtauth/v5"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/rs/zerolog"
@@ -168,67 +166,7 @@ func main() {
 	// Wire HTTP handlers with service and persistence dependencies.
 	h := api.NewHandler(ledgerSvc, store)
 
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.RequestID)
-
-	// CORS middleware for separate frontend deployments and local development.
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   parseAllowedOrigins(),
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
-
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Attach request metadata to logs for traceability during debugging.
-			reqID := middleware.GetReqID(r.Context())
-			zlog.Info().Str("request_id", reqID).Str("path", r.URL.Path).Msg("Request received")
-			next.ServeHTTP(w, r)
-		})
-	})
-
-	// Public routes
-	r.Post("/register", h.Register)
-	r.Post("/login", h.Login)
-	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		// Health returns service liveness plus lightweight runtime metadata.
-		zlog.Info().Msg("Health check requested")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(map[string]string{
-			"status":  "healthy",
-			"version": "0.1.0",
-			"uptime":  time.Since(startTime).String(),
-		}); err != nil {
-			zlog.Error().Err(err).Msg("Failed to encode health check response")
-		}
-	})
-
-	r.Get("/swagger/*", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"),
-		httpSwagger.DeepLinking(true),
-	))
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		// Apply JWT verification only to protected business endpoints.
-		r.Use(jwtauth.Verifier(api.TokenAuth))
-		r.Use(jwtauth.Authenticator(api.TokenAuth))
-
-		r.Post("/accounts", h.CreateAccount)
-		r.Get("/accounts", h.ListAccounts)
-		r.Get("/accounts/{id}", h.GetAccount)
-		r.Post("/accounts/{id}/deposit", h.Deposit)
-		r.Post("/accounts/{id}/withdraw", h.Withdraw)
-		r.Post("/transfers", h.Transfer)
-		r.Get("/accounts/{id}/entries", h.GetEntries)
-		r.Get("/accounts/{id}/reconcile", h.ReconcileAccount)
-		r.Get("/transactions/{id}", h.GetTransactions)
-	})
+	r := newRouter(h, startTime)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -250,4 +188,118 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		zlog.Fatal().Err(err).Msg("Server failed to start")
 	}
+}
+
+// requestIDKey is where the per-request identifier is kept for the log middleware.
+const requestIDKey = "request_id"
+
+// requestID reuses an inbound X-Request-Id when the caller supplies one and
+// mints a fresh identifier otherwise. It is kept off the response, as before.
+func requestID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reqID := c.GetHeader("X-Request-Id")
+		if reqID == "" {
+			reqID = uuid.NewString()
+		}
+		c.Set(requestIDKey, reqID)
+		c.Next()
+	}
+}
+
+// newRouter builds the HTTP router: middleware chain, public routes, the Swagger
+// UI mount and the JWT-protected business endpoints.
+func newRouter(h *api.Handler, startTime time.Time) *gin.Engine {
+	r := gin.New()
+
+	// The previous router neither redirected trailing slashes nor guessed at a
+	// near-miss path, and it answered 405 when a known path was reached with an
+	// unregistered method. Gin defaults differ on all three, so pin them.
+	r.RedirectTrailingSlash = false
+	r.RedirectFixedPath = false
+	r.HandleMethodNotAllowed = true
+
+	// Unmatched paths get net/http's own 404; an unregistered method gets a bare
+	// 405 carrying one Allow header per permitted method.
+	r.NoRoute(func(c *gin.Context) {
+		http.NotFound(c.Writer, c.Request)
+	})
+	r.NoMethod(func(c *gin.Context) {
+		header := c.Writer.Header()
+		if allow := header.Get("Allow"); allow != "" {
+			header.Del("Allow")
+			for _, method := range strings.Split(allow, ", ") {
+				header.Add("Allow", method)
+			}
+		}
+		c.Status(http.StatusMethodNotAllowed)
+		c.Writer.WriteHeaderNow()
+	})
+
+	r.Use(gin.Logger())
+	r.Use(gin.Recovery())
+	r.Use(requestID())
+
+	// CORS middleware for separate frontend deployments and local development.
+	r.Use(api.CORS(api.CORSOptions{
+		AllowedOrigins:   parseAllowedOrigins(),
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	r.Use(func(c *gin.Context) {
+		// Attach request metadata to logs for traceability during debugging.
+		reqID := c.GetString(requestIDKey)
+		zlog.Info().Str("request_id", reqID).Str("path", c.Request.URL.Path).Msg("Request received")
+		c.Next()
+	})
+
+	// Public routes
+	r.POST("/register", h.Register)
+	r.POST("/login", h.Login)
+	r.GET("/health", func(c *gin.Context) {
+		// Health returns service liveness plus lightweight runtime metadata.
+		zlog.Info().Msg("Health check requested")
+		c.Header("Content-Type", "application/json")
+		c.Status(http.StatusOK)
+		if err := json.NewEncoder(c.Writer).Encode(map[string]string{
+			"status":  "healthy",
+			"version": "0.1.0",
+			"uptime":  time.Since(startTime).String(),
+		}); err != nil {
+			zlog.Error().Err(err).Msg("Failed to encode health check response")
+		}
+	})
+
+	// Serve the Swagger UI through swaggo/http-swagger (the adapter the pre-migration
+	// Chi service used) rather than swaggo/gin-swagger: the two adapters vendor
+	// different UI shells, and reusing the upstream package keeps the rendered
+	// /swagger/index.html byte-identical to the original service. gin.WrapH adapts
+	// the net/http handler to Gin's router; the handler derives its own prefix from
+	// the request URI, so it keeps serving doc.json and the static assets as before.
+	r.GET("/swagger/*any", gin.WrapH(httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+		httpSwagger.DeepLinking(true),
+	)))
+	// Protected routes
+	protected := r.Group("")
+	{
+		// Apply JWT verification only to protected business endpoints.
+		protected.Use(api.Verifier(api.TokenAuth))
+		protected.Use(api.Authenticator())
+
+		protected.POST("/accounts", h.CreateAccount)
+		protected.GET("/accounts", h.ListAccounts)
+		protected.GET("/accounts/:id", h.GetAccount)
+		protected.POST("/accounts/:id/deposit", h.Deposit)
+		protected.POST("/accounts/:id/withdraw", h.Withdraw)
+		protected.POST("/transfers", h.Transfer)
+		protected.GET("/accounts/:id/entries", h.GetEntries)
+		protected.GET("/accounts/:id/reconcile", h.ReconcileAccount)
+		protected.GET("/transactions/:id", h.GetTransactions)
+	}
+
+	return r
 }

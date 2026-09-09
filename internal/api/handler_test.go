@@ -11,6 +11,7 @@ import (
 
 	"github.com/PaulBabatuyi/Double-Entry-Bank-Go/internal/db"
 	"github.com/PaulBabatuyi/Double-Entry-Bank-Go/internal/service"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,7 @@ import (
 )
 
 func setupTestHandler(t *testing.T) *Handler {
+	gin.SetMode(gin.TestMode)
 	// Use configured DB when available; otherwise fallback to local development DSN.
 	dbURL := os.Getenv("DB_URL")
 	if dbURL == "" {
@@ -30,12 +32,19 @@ func setupTestHandler(t *testing.T) *Handler {
 	return NewHandler(ledger, store)
 }
 
+// newTestContext binds a request to a handler context backed by the recorder.
+func newTestContext(rw *httptest.ResponseRecorder, req *http.Request) *gin.Context {
+	c, _ := gin.CreateTestContext(rw)
+	c.Request = req
+	return c
+}
+
 func TestRegisterHandler_BadRequest(t *testing.T) {
 	// Missing request body should trigger 400 validation response.
 	h := setupTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/register", nil)
 	rw := httptest.NewRecorder()
-	h.Register(rw, req)
+	h.Register(newTestContext(rw, req))
 	assert.Equal(t, http.StatusBadRequest, rw.Code)
 }
 
@@ -52,7 +61,7 @@ func TestRegisterHandler_Success(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(b))
 	rw := httptest.NewRecorder()
 
-	h.Register(rw, req)
+	h.Register(newTestContext(rw, req))
 	assert.Equal(t, http.StatusCreated, rw.Code)
 }
 
